@@ -340,7 +340,7 @@ struct DesktopWindow::Pimpl
     {
         using namespace choc::objc;
         CHOC_AUTORELEASE_BEGIN
-        call<void> (getSharedNSApplication(), "setActivationPolicy:", NSApplicationActivationPolicyRegular);
+        call<void> (getSharedNSApplication(), "setActivationPolicy:", 1); // NSApplicationActivationPolicyAccessory - hides from Dock
 
         window = call<id> (callClass<id> ("NSWindow", "alloc"),
                            "initWithContentRect:styleMask:backing:defer:",
@@ -765,11 +765,21 @@ struct DesktopWindow::Pimpl
 {
     Pimpl (DesktopWindow& w, Bounds b)  : owner (w)
     {
-        hwnd = windowClass.createWindow (WS_OVERLAPPEDWINDOW, 640, 480, this);
+        hwnd = HWNDHolder (CreateWindowExW (WS_EX_TOOLWINDOW,
+                                            windowClass.getClassName(),
+                                            L"",
+                                            WS_OVERLAPPEDWINDOW,
+                                            CW_USEDEFAULT, CW_USEDEFAULT,
+                                            b.width > 0 ? b.width : 640,
+                                            b.height > 0 ? b.height : 480,
+                                            nullptr, nullptr,
+                                            windowClass.moduleHandle,
+                                            nullptr));
 
         if (hwnd.hwnd == nullptr)
             return;
 
+        SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
         setBounds (b);
         ShowWindow (hwnd, SW_SHOW);
         UpdateWindow (hwnd);
