@@ -765,25 +765,43 @@ struct DesktopWindow::Pimpl
 {
     Pimpl (DesktopWindow& w, Bounds b)  : owner (w)
     {
-        hwnd = HWNDHolder (CreateWindowExW (WS_EX_TOOLWINDOW,
-                                            windowClass.getClassName(),
-                                            L"",
-                                            WS_OVERLAPPEDWINDOW,
-                                            CW_USEDEFAULT, CW_USEDEFAULT,
-                                            b.width > 0 ? b.width : 640,
-                                            b.height > 0 ? b.height : 480,
-                                            nullptr, nullptr,
-                                            windowClass.moduleHandle,
-                                            nullptr));
+        ownerHwnd = HWNDHolder (CreateWindowExW (
+            WS_EX_TOOLWINDOW,
+            windowClass.getClassName(),
+            L"Owner",
+            WS_DISABLED,
+            0, 0, 1, 1,
+            nullptr, nullptr,
+            windowClass.moduleHandle,
+            nullptr));
+
+        if (!ownerHwnd.hwnd) {
+            DWORD error = GetLastError();
+            return;
+        }
+
+        ShowWindow(ownerHwnd, SW_SHOWNA);
+        hwnd = HWNDHolder (CreateWindowExW (
+            0,
+            windowClass.getClassName(),
+            L"",
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT,
+            b.width > 0 ? b.width : 640,
+            b.height > 0 ? b.height : 480,
+            ownerHwnd.hwnd,
+            nullptr,
+            windowClass.moduleHandle,
+            nullptr));
 
         if (hwnd.hwnd == nullptr)
             return;
+        HWND owner = GetWindow(hwnd.hwnd, GW_OWNER);
 
         SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
         setBounds (b);
         ShowWindow (hwnd, SW_SHOW);
         UpdateWindow (hwnd);
-        SetFocus (hwnd);
     }
 
     ~Pimpl()
@@ -821,7 +839,10 @@ struct DesktopWindow::Pimpl
         ShowWindow (hwnd, visible ? SW_SHOW : SW_HIDE);
 
         if (visible)
-            InvalidateRect (hwnd, nullptr, 0);
+        {
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        }
     }
 
     void setResizable (bool b)
@@ -892,7 +913,35 @@ struct DesktopWindow::Pimpl
 
     void toFront()
     {
-        BringWindowToTop (hwnd);
+        if (IsIconic(hwnd))
+            ShowWindow(hwnd, SW_RESTORE);
+
+        ShowWindow(hwnd, SW_SHOW);
+
+        // Make window always-on-top (TOPMOST)
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+
+        DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+        DWORD currentThreadId = GetCurrentThreadId();
+
+        if (foregroundThreadId != currentThreadId)
+        {
+            AttachThreadInput(currentThreadId, foregroundThreadId, TRUE);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+            AttachThreadInput(currentThreadId, foregroundThreadId, FALSE);
+        }
+        else
+        {
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+
+        HWND foreground = GetForegroundWindow();
     }
 
     Bounds getBounds()
@@ -920,6 +969,7 @@ private:
     POINT minimumSize = {}, maximumSize = {};
     WindowClass windowClass { L"CHOCWindow", (WNDPROC) wndProc };
     FileDropCallback fileDropCallback;
+    HWNDHolder ownerHwnd;
 
     Bounds scaleBounds (Bounds b, double scale)
     {
