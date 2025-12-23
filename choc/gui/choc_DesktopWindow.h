@@ -24,7 +24,9 @@
 #include <functional>
 #include "../platform/choc_Platform.h"
 #include "../platform/choc_Assert.h"
-
+#include <mutex>
+#include <chrono>
+#include <fstream>
 
 //==============================================================================
 namespace choc::ui
@@ -96,6 +98,9 @@ struct DesktopWindow
 
     /// Tries to bring this window to the front of the Z-order.
     void toFront();
+
+    /// Sets whether this window should always stay on top of other windows.
+    void setAlwaysOnTop(bool shouldBeOnTop);
 
     /// Returns the native OS handle, which may be a HWND on Windows, an
     /// NSWindow* on OSX or a GtkWidget* on linux.
@@ -253,6 +258,12 @@ struct choc::ui::DesktopWindow::Pimpl
     void toFront()
     {
         gtk_window_activate_default (GTK_WINDOW (window));
+    }
+
+    // TODO - check this for correctness
+    void setAlwaysOnTop( bool shouldBeOnTop )
+    {
+        gtk_window_set_keep_above( GTK_WINDOW( window ), shouldBeOnTop );
     }
 
     Bounds getBounds()
@@ -442,6 +453,13 @@ struct DesktopWindow::Pimpl
         CHOC_AUTORELEASE_BEGIN
         objc::call<void> (objc::getSharedNSApplication(), "activateIgnoringOtherApps:", (BOOL) 1);
         objc::call<void> (window, "makeKeyAndOrderFront:", (id) nullptr);
+        CHOC_AUTORELEASE_END
+    }
+
+    // TODO - check for correctness
+    void setAlwaysOnTop(bool shouldBeOnTop) {
+        CHOC_AUTORELEASE_BEGIN
+        objc::call<void> (window, "setLevel:", shouldBeOnTop ? 3 /*NSFloatingWindowLevel*/ : 0 /*NSNormalWindowLevel*/);
         CHOC_AUTORELEASE_END
     }
 
@@ -765,6 +783,9 @@ struct DesktopWindow::Pimpl
 {
     Pimpl (DesktopWindow& w, Bounds b)  : owner (w)
     {
+        debugLog("=== Creating Windows ===");
+
+        debugLog("Creating hidden owner window...");
         ownerHwnd = HWNDHolder (CreateWindowExW (
             WS_EX_TOOLWINDOW,
             windowClass.getClassName(),
@@ -777,10 +798,16 @@ struct DesktopWindow::Pimpl
 
         if (!ownerHwnd.hwnd) {
             DWORD error = GetLastError();
+            debugLog("FAILED: Owner window creation error: " + std::to_string(error));
             return;
         }
 
         ShowWindow(ownerHwnd, SW_SHOWNA);
+
+        debugLog("Owner HWND: 0x" + std::to_string((uintptr_t)ownerHwnd.hwnd));
+        debugLog("Owner IsWindow: " + std::to_string(IsWindow(ownerHwnd.hwnd)));
+
+        debugLog("Creating visible window...");
         hwnd = HWNDHolder (CreateWindowExW (
             0,
             windowClass.getClassName(),
@@ -794,15 +821,34 @@ struct DesktopWindow::Pimpl
             windowClass.moduleHandle,
             nullptr));
 
-        if (hwnd.hwnd == nullptr)
+        if (!hwnd.hwnd) {
+            DWORD error = GetLastError();
+            debugLog("FAILED: Visible window creation error: " + std::to_string(error));
             return;
+        }
+
+        debugLog("Visible HWND: 0x" + std::to_string((uintptr_t)hwnd.hwnd));
+        debugLog("Visible IsWindow: " + std::to_string(IsWindow(hwnd.hwnd)));
+
         HWND owner = GetWindow(hwnd.hwnd, GW_OWNER);
+        debugLog("GetWindow(GW_OWNER): 0x" + std::to_string((uintptr_t)owner));
+        debugLog("Owner matches: " + std::to_string(owner == ownerHwnd.hwnd));
 
         SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
+        debugLog("SetWindowLongPtr complete");
+
         setBounds (b);
+        debugLog("setBounds complete");
+
         ShowWindow (hwnd, SW_SHOW);
+        debugLog("ShowWindow complete");
+
         UpdateWindow (hwnd);
+        debugLog("=== Constructor Complete ===\n");
     }
+
+    HWNDHolder ownerHwnd;  // Add to member variables
+
 
     ~Pimpl()
     {
@@ -836,6 +882,10 @@ struct DesktopWindow::Pimpl
 
     void setVisible (bool visible)
     {
+        debugLog("setVisible(" + std::string(visible ? "true" : "false") + ")");
+        debugLog("  Before: IsWindow=" + std::to_string(IsWindow(hwnd.hwnd)) +
+                 ", IsWindowVisible=" + std::to_string(IsWindowVisible(hwnd.hwnd)));
+
         ShowWindow (hwnd, visible ? SW_SHOW : SW_HIDE);
 
         if (visible)
@@ -843,8 +893,9 @@ struct DesktopWindow::Pimpl
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         }
-    }
 
+        debugLog("  After: IsWindowVisible=" + std::to_string(IsWindowVisible(hwnd.hwnd)));
+    }
     void setResizable (bool b)
     {
         auto style = GetWindowLong (hwnd, GWL_STYLE);
@@ -918,10 +969,6 @@ struct DesktopWindow::Pimpl
 
         ShowWindow(hwnd, SW_SHOW);
 
-        // Make window always-on-top (TOPMOST)
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-
         DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
         DWORD currentThreadId = GetCurrentThreadId();
 
@@ -940,8 +987,13 @@ struct DesktopWindow::Pimpl
 
         SetActiveWindow(hwnd);
         SetFocus(hwnd);
+    }
 
-        HWND foreground = GetForegroundWindow();
+    void setAlwaysOnTop(bool shouldBeOnTop)
+    {
+        SetWindowPos(hwnd, shouldBeOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+                     0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     Bounds getBounds()
@@ -969,7 +1021,23 @@ private:
     POINT minimumSize = {}, maximumSize = {};
     WindowClass windowClass { L"CHOCWindow", (WNDPROC) wndProc };
     FileDropCallback fileDropCallback;
-    HWNDHolder ownerHwnd;
+
+// Add at top of Pimpl class
+void debugLog(const std::string& message) const
+{
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lock(logMutex);
+
+    std::ofstream log("C:\\Temp\\choc_window_debug.txt", std::ios::app);
+    if (log.is_open())
+    {
+        auto now = std::chrono::system_clock::now();
+        auto time = std::chrono::system_clock::to_time_t(now);
+        log << std::ctime(&time) << ": " << message << std::endl;
+        log.flush();
+    }
+}
+
 
     Bounds scaleBounds (Bounds b, double scale)
     {
@@ -1119,6 +1187,8 @@ inline Bounds DesktopWindow::getBounds()                                   { ret
 inline void DesktopWindow::centreWithSize (int w, int h)                   { pimpl->centreWithSize (w, h); }
 inline void DesktopWindow::toFront()                                       { pimpl->toFront(); }
 inline void DesktopWindow::setFileDropCallback (FileDropCallback h)         { pimpl->setFileDropCallback (std::move (h)); }
+inline void DesktopWindow::setAlwaysOnTop(bool b) { pimpl->setAlwaysOnTop(b); }
+
 
 } // namespace choc::ui
 
