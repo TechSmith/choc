@@ -174,6 +174,32 @@ struct choc::ui::DesktopWindow::Pimpl
         setVisible (true);
     }
 
+// TODO - check for correctness. AI generated
+    Pimpl (DesktopWindow& w, Bounds bounds, bool hideTaskbarIcon)  : owner (w)
+    {
+        if (! gtk_init_check (nullptr, nullptr))
+            return;
+
+        window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
+        g_object_ref_sink (G_OBJECT (window));
+
+        // Hide from taskbar if requested
+        if (hideTaskbarIcon)
+        {
+            gtk_window_set_skip_taskbar_hint (GTK_WINDOW (window), TRUE);
+            gtk_window_set_skip_pager_hint (GTK_WINDOW (window), TRUE);
+        }
+
+        destroyHandlerID = g_signal_connect (G_OBJECT (window), "destroy",
+                                             G_CALLBACK (+[](GtkWidget*, gpointer arg)
+                                             {
+                                                 static_cast<Pimpl*> (arg)->windowDestroyEvent();
+                                             }),
+                                             this);
+        setBounds (bounds);
+        setVisible (true);
+    }
+
     ~Pimpl()
     {
         if (destroyHandlerID != 0 && window != nullptr)
@@ -369,6 +395,32 @@ struct DesktopWindow::Pimpl
         CHOC_AUTORELEASE_END
     }
 
+    // TODO - check for correctness. AI generated
+    Pimpl (DesktopWindow& w, Bounds bounds, bool hideTaskbarIcon)  : owner (w)
+    {
+        using namespace choc::objc;
+        CHOC_AUTORELEASE_BEGIN
+
+        // Set activation policy based on hideTaskbarIcon flag
+        call<void> (getSharedNSApplication(), "setActivationPolicy:",
+                    hideTaskbarIcon ? 1 : 0); // 1 = NSApplicationActivationPolicyAccessory, 0 = NSApplicationActivationPolicyRegular
+
+        window = call<id> (callClass<id> ("NSWindow", "alloc"),
+                           "initWithContentRect:styleMask:backing:defer:",
+                           createCGRect (bounds),
+                           NSWindowStyleMaskTitled, NSBackingStoreBuffered, (int) 0);
+
+        delegate = createDelegate();
+        setStyleBit (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable, true);
+        objc_setAssociatedObject (delegate, "choc_window", (CHOC_OBJC_CAST_BRIDGED id) this, OBJC_ASSOCIATION_ASSIGN);
+
+        intermediateView = objc::call<id> (objc::callClass<id> ("NSView", "alloc"), "init");
+        objc::call<void> (intermediateView, "setAutoresizingMask:", 18); // NSViewWidthSizable | NSViewHeightSizable
+        objc::call<void> (window, "setContentView:", intermediateView);
+
+        call<void> (window, "setDelegate:", delegate);
+        CHOC_AUTORELEASE_END
+    }
     ~Pimpl()
     {
         CHOC_AUTORELEASE_BEGIN
