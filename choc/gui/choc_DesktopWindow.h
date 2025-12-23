@@ -376,7 +376,7 @@ struct DesktopWindow::Pimpl
     {
         using namespace choc::objc;
         CHOC_AUTORELEASE_BEGIN
-        call<void> (getSharedNSApplication(), "setActivationPolicy:", 1); // NSApplicationActivationPolicyAccessory - hides from Dock
+        call<void> (getSharedNSApplication(), "setActivationPolicy:", NSApplicationActivationPolicyRegular);
 
         window = call<id> (callClass<id> ("NSWindow", "alloc"),
                            "initWithContentRect:styleMask:backing:defer:",
