@@ -24,9 +24,7 @@
 #include <functional>
 #include "../platform/choc_Platform.h"
 #include "../platform/choc_Assert.h"
-#include <mutex>
-#include <chrono>
-#include <fstream>
+
 
 //==============================================================================
 namespace choc::ui
@@ -62,6 +60,7 @@ struct Bounds
 struct DesktopWindow
 {
     DesktopWindow (Bounds);
+    DesktopWindow (Bounds, bool hideTaskbarIcon);
     ~DesktopWindow();
 
     /// Sets the title of the window that the browser is inside
@@ -783,72 +782,66 @@ struct DesktopWindow::Pimpl
 {
     Pimpl (DesktopWindow& w, Bounds b)  : owner (w)
     {
-        debugLog("=== Creating Windows ===");
+        hwnd = HWNDHolder (CreateWindowExW (WS_EX_TOOLWINDOW,
+                                            windowClass.getClassName(),
+                                            L"",
+                                            WS_OVERLAPPEDWINDOW,
+                                            CW_USEDEFAULT, CW_USEDEFAULT,
+                                            b.width > 0 ? b.width : 640,
+                                            b.height > 0 ? b.height : 480,
+                                            nullptr, nullptr,
+                                            windowClass.moduleHandle,
+                                            nullptr));
 
-        debugLog("Creating hidden owner window...");
-        ownerHwnd = HWNDHolder (CreateWindowExW (
-            WS_EX_TOOLWINDOW,
-            windowClass.getClassName(),
-            L"Owner",
-            WS_DISABLED,
-            0, 0, 1, 1,
-            nullptr, nullptr,
-            windowClass.moduleHandle,
-            nullptr));
-
-        if (!ownerHwnd.hwnd) {
-            DWORD error = GetLastError();
-            debugLog("FAILED: Owner window creation error: " + std::to_string(error));
+        if (hwnd.hwnd == nullptr)
             return;
+
+        SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
+        setBounds (b);
+        ShowWindow (hwnd, SW_SHOW);
+        UpdateWindow (hwnd);
+        SetFocus (hwnd);
+    }
+
+    Pimpl (DesktopWindow& w, Bounds b, bool hideTaskbarIcon)  : owner (w)
+    {
+        if (hideTaskbarIcon)
+        {
+            ownerHwnd = HWNDHolder (CreateWindowExW (
+                WS_EX_TOOLWINDOW,
+                windowClass.getClassName(),
+                L"Owner",
+                WS_DISABLED,
+                0, 0, 1, 1,
+                nullptr, nullptr,
+                windowClass.moduleHandle,
+                nullptr));
+
+            if (ownerHwnd.hwnd)
+                ShowWindow(ownerHwnd, SW_SHOWNA);
         }
 
-        ShowWindow(ownerHwnd, SW_SHOWNA);
-
-        debugLog("Owner HWND: 0x" + std::to_string((uintptr_t)ownerHwnd.hwnd));
-        debugLog("Owner IsWindow: " + std::to_string(IsWindow(ownerHwnd.hwnd)));
-
-        debugLog("Creating visible window...");
         hwnd = HWNDHolder (CreateWindowExW (
-            0,
+            hideTaskbarIcon ? 0 : 0,
             windowClass.getClassName(),
             L"",
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT, CW_USEDEFAULT,
             b.width > 0 ? b.width : 640,
             b.height > 0 ? b.height : 480,
-            ownerHwnd.hwnd,
+            hideTaskbarIcon ? ownerHwnd.hwnd : nullptr,
             nullptr,
             windowClass.moduleHandle,
             nullptr));
 
-        if (!hwnd.hwnd) {
-            DWORD error = GetLastError();
-            debugLog("FAILED: Visible window creation error: " + std::to_string(error));
+        if (!hwnd.hwnd)
             return;
-        }
-
-        debugLog("Visible HWND: 0x" + std::to_string((uintptr_t)hwnd.hwnd));
-        debugLog("Visible IsWindow: " + std::to_string(IsWindow(hwnd.hwnd)));
-
-        HWND owner = GetWindow(hwnd.hwnd, GW_OWNER);
-        debugLog("GetWindow(GW_OWNER): 0x" + std::to_string((uintptr_t)owner));
-        debugLog("Owner matches: " + std::to_string(owner == ownerHwnd.hwnd));
 
         SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
-        debugLog("SetWindowLongPtr complete");
-
         setBounds (b);
-        debugLog("setBounds complete");
-
         ShowWindow (hwnd, SW_SHOW);
-        debugLog("ShowWindow complete");
-
         UpdateWindow (hwnd);
-        debugLog("=== Constructor Complete ===\n");
     }
-
-    HWNDHolder ownerHwnd;  // Add to member variables
-
 
     ~Pimpl()
     {
@@ -882,10 +875,6 @@ struct DesktopWindow::Pimpl
 
     void setVisible (bool visible)
     {
-        debugLog("setVisible(" + std::string(visible ? "true" : "false") + ")");
-        debugLog("  Before: IsWindow=" + std::to_string(IsWindow(hwnd.hwnd)) +
-                 ", IsWindowVisible=" + std::to_string(IsWindowVisible(hwnd.hwnd)));
-
         ShowWindow (hwnd, visible ? SW_SHOW : SW_HIDE);
 
         if (visible)
@@ -893,8 +882,6 @@ struct DesktopWindow::Pimpl
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         }
-
-        debugLog("  After: IsWindowVisible=" + std::to_string(IsWindowVisible(hwnd.hwnd)));
     }
     void setResizable (bool b)
     {
@@ -964,29 +951,7 @@ struct DesktopWindow::Pimpl
 
     void toFront()
     {
-        if (IsIconic(hwnd))
-            ShowWindow(hwnd, SW_RESTORE);
-
-        ShowWindow(hwnd, SW_SHOW);
-
-        DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
-        DWORD currentThreadId = GetCurrentThreadId();
-
-        if (foregroundThreadId != currentThreadId)
-        {
-            AttachThreadInput(currentThreadId, foregroundThreadId, TRUE);
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-            AttachThreadInput(currentThreadId, foregroundThreadId, FALSE);
-        }
-        else
-        {
-            BringWindowToTop(hwnd);
-            SetForegroundWindow(hwnd);
-        }
-
-        SetActiveWindow(hwnd);
-        SetFocus(hwnd);
+        BringWindowToTop (hwnd);
     }
 
     void setAlwaysOnTop(bool shouldBeOnTop)
@@ -1017,27 +982,10 @@ struct DesktopWindow::Pimpl
 
 private:
     DesktopWindow& owner;
-    HWNDHolder hwnd;
+    HWNDHolder hwnd, ownerHwnd;
     POINT minimumSize = {}, maximumSize = {};
     WindowClass windowClass { L"CHOCWindow", (WNDPROC) wndProc };
     FileDropCallback fileDropCallback;
-
-// Add at top of Pimpl class
-void debugLog(const std::string& message) const
-{
-    static std::mutex logMutex;
-    std::lock_guard<std::mutex> lock(logMutex);
-
-    std::ofstream log("C:\\Temp\\choc_window_debug.txt", std::ios::app);
-    if (log.is_open())
-    {
-        auto now = std::chrono::system_clock::now();
-        auto time = std::chrono::system_clock::to_time_t(now);
-        log << std::ctime(&time) << ": " << message << std::endl;
-        log.flush();
-    }
-}
-
 
     Bounds scaleBounds (Bounds b, double scale)
     {
@@ -1172,6 +1120,7 @@ namespace choc::ui
 
 //==============================================================================
 inline DesktopWindow::DesktopWindow (Bounds b) { pimpl = std::make_unique<Pimpl> (*this, b); }
+inline DesktopWindow::DesktopWindow (Bounds b, bool hideTaskbarIcon) { pimpl = std::make_unique<Pimpl> (*this, b, hideTaskbarIcon); }
 inline DesktopWindow::~DesktopWindow()  {}
 
 inline void* DesktopWindow::getWindowHandle() const                        { return pimpl->getWindowHandle(); }
