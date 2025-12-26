@@ -60,6 +60,7 @@ struct Bounds
 struct DesktopWindow
 {
     DesktopWindow (Bounds);
+    DesktopWindow (Bounds, bool hideTaskbarIcon);
     ~DesktopWindow();
 
     /// Sets the title of the window that the browser is inside
@@ -96,6 +97,9 @@ struct DesktopWindow
 
     /// Tries to bring this window to the front of the Z-order.
     void toFront();
+
+    /// Sets whether this window should always stay on top of other windows.
+    void setAlwaysOnTop(bool shouldBeOnTop);
 
     /// Returns the native OS handle, which may be a HWND on Windows, an
     /// NSWindow* on OSX or a GtkWidget* on linux.
@@ -159,6 +163,32 @@ struct choc::ui::DesktopWindow::Pimpl
 
         window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
         g_object_ref_sink (G_OBJECT (window));
+
+        destroyHandlerID = g_signal_connect (G_OBJECT (window), "destroy",
+                                             G_CALLBACK (+[](GtkWidget*, gpointer arg)
+                                             {
+                                                 static_cast<Pimpl*> (arg)->windowDestroyEvent();
+                                             }),
+                                             this);
+        setBounds (bounds);
+        setVisible (true);
+    }
+
+// TODO - check for correctness. AI generated
+    Pimpl (DesktopWindow& w, Bounds bounds, bool hideTaskbarIcon)  : owner (w)
+    {
+        if (! gtk_init_check (nullptr, nullptr))
+            return;
+
+        window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
+        g_object_ref_sink (G_OBJECT (window));
+
+        // Hide from taskbar if requested
+        if (hideTaskbarIcon)
+        {
+            gtk_window_set_skip_taskbar_hint (GTK_WINDOW (window), TRUE);
+            gtk_window_set_skip_pager_hint (GTK_WINDOW (window), TRUE);
+        }
 
         destroyHandlerID = g_signal_connect (G_OBJECT (window), "destroy",
                                              G_CALLBACK (+[](GtkWidget*, gpointer arg)
@@ -253,6 +283,12 @@ struct choc::ui::DesktopWindow::Pimpl
     void toFront()
     {
         gtk_window_activate_default (GTK_WINDOW (window));
+    }
+
+    // TODO - check this for correctness
+    void setAlwaysOnTop( bool shouldBeOnTop )
+    {
+        gtk_window_set_keep_above( GTK_WINDOW( window ), shouldBeOnTop );
     }
 
     Bounds getBounds()
@@ -359,6 +395,32 @@ struct DesktopWindow::Pimpl
         CHOC_AUTORELEASE_END
     }
 
+    // TODO - check for correctness. AI generated
+    Pimpl (DesktopWindow& w, Bounds bounds, bool hideTaskbarIcon)  : owner (w)
+    {
+        using namespace choc::objc;
+        CHOC_AUTORELEASE_BEGIN
+
+        // Set activation policy based on hideTaskbarIcon flag
+        call<void> (getSharedNSApplication(), "setActivationPolicy:",
+                    hideTaskbarIcon ? 1 : 0); // 1 = NSApplicationActivationPolicyAccessory, 0 = NSApplicationActivationPolicyRegular
+
+        window = call<id> (callClass<id> ("NSWindow", "alloc"),
+                           "initWithContentRect:styleMask:backing:defer:",
+                           createCGRect (bounds),
+                           NSWindowStyleMaskTitled, NSBackingStoreBuffered, (int) 0);
+
+        delegate = createDelegate();
+        setStyleBit (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable, true);
+        objc_setAssociatedObject (delegate, "choc_window", (CHOC_OBJC_CAST_BRIDGED id) this, OBJC_ASSOCIATION_ASSIGN);
+
+        intermediateView = objc::call<id> (objc::callClass<id> ("NSView", "alloc"), "init");
+        objc::call<void> (intermediateView, "setAutoresizingMask:", 18); // NSViewWidthSizable | NSViewHeightSizable
+        objc::call<void> (window, "setContentView:", intermediateView);
+
+        call<void> (window, "setDelegate:", delegate);
+        CHOC_AUTORELEASE_END
+    }
     ~Pimpl()
     {
         CHOC_AUTORELEASE_BEGIN
@@ -442,6 +504,13 @@ struct DesktopWindow::Pimpl
         CHOC_AUTORELEASE_BEGIN
         objc::call<void> (objc::getSharedNSApplication(), "activateIgnoringOtherApps:", (BOOL) 1);
         objc::call<void> (window, "makeKeyAndOrderFront:", (id) nullptr);
+        CHOC_AUTORELEASE_END
+    }
+
+    // TODO - check for correctness
+    void setAlwaysOnTop(bool shouldBeOnTop) {
+        CHOC_AUTORELEASE_BEGIN
+        objc::call<void> (window, "setLevel:", shouldBeOnTop ? 3 /*NSFloatingWindowLevel*/ : 0 /*NSNormalWindowLevel*/);
         CHOC_AUTORELEASE_END
     }
 
@@ -765,15 +834,65 @@ struct DesktopWindow::Pimpl
 {
     Pimpl (DesktopWindow& w, Bounds b)  : owner (w)
     {
-        hwnd = windowClass.createWindow (WS_OVERLAPPEDWINDOW, 640, 480, this);
+        hwnd = HWNDHolder (CreateWindowExW (WS_EX_TOOLWINDOW,
+                                            windowClass.getClassName(),
+                                            L"",
+                                            WS_OVERLAPPEDWINDOW,
+                                            CW_USEDEFAULT, CW_USEDEFAULT,
+                                            b.width > 0 ? b.width : 640,
+                                            b.height > 0 ? b.height : 480,
+                                            nullptr, nullptr,
+                                            windowClass.moduleHandle,
+                                            nullptr));
 
         if (hwnd.hwnd == nullptr)
             return;
 
+        SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
         setBounds (b);
         ShowWindow (hwnd, SW_SHOW);
         UpdateWindow (hwnd);
         SetFocus (hwnd);
+    }
+
+    Pimpl (DesktopWindow& w, Bounds b, bool hideTaskbarIcon)  : owner (w)
+    {
+        if (hideTaskbarIcon)
+        {
+            ownerHwnd = HWNDHolder (CreateWindowExW (
+                WS_EX_TOOLWINDOW,
+                windowClass.getClassName(),
+                L"Owner",
+                WS_DISABLED,
+                0, 0, 1, 1,
+                nullptr, nullptr,
+                windowClass.moduleHandle,
+                nullptr));
+
+            if (ownerHwnd.hwnd)
+                ShowWindow(ownerHwnd, SW_SHOWNA);
+        }
+
+        hwnd = HWNDHolder (CreateWindowExW (
+            hideTaskbarIcon ? 0 : 0,
+            windowClass.getClassName(),
+            L"",
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT,
+            b.width > 0 ? b.width : 640,
+            b.height > 0 ? b.height : 480,
+            hideTaskbarIcon ? ownerHwnd.hwnd : nullptr,
+            nullptr,
+            windowClass.moduleHandle,
+            nullptr));
+
+        if (!hwnd.hwnd)
+            return;
+
+        SetWindowLongPtr (hwnd.hwnd, GWLP_USERDATA, (LONG_PTR) this);
+        setBounds (b);
+        ShowWindow (hwnd, SW_SHOW);
+        UpdateWindow (hwnd);
     }
 
     ~Pimpl()
@@ -811,9 +930,11 @@ struct DesktopWindow::Pimpl
         ShowWindow (hwnd, visible ? SW_SHOW : SW_HIDE);
 
         if (visible)
-            InvalidateRect (hwnd, nullptr, 0);
+        {
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        }
     }
-
     void setResizable (bool b)
     {
         auto style = GetWindowLong (hwnd, GWL_STYLE);
@@ -885,6 +1006,13 @@ struct DesktopWindow::Pimpl
         BringWindowToTop (hwnd);
     }
 
+    void setAlwaysOnTop(bool shouldBeOnTop)
+    {
+        SetWindowPos(hwnd, shouldBeOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
+                     0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
     Bounds getBounds()
     {
         RECT r;
@@ -906,7 +1034,7 @@ struct DesktopWindow::Pimpl
 
 private:
     DesktopWindow& owner;
-    HWNDHolder hwnd;
+    HWNDHolder hwnd, ownerHwnd;
     POINT minimumSize = {}, maximumSize = {};
     WindowClass windowClass { L"CHOCWindow", (WNDPROC) wndProc };
     FileDropCallback fileDropCallback;
@@ -1044,6 +1172,7 @@ namespace choc::ui
 
 //==============================================================================
 inline DesktopWindow::DesktopWindow (Bounds b) { pimpl = std::make_unique<Pimpl> (*this, b); }
+inline DesktopWindow::DesktopWindow (Bounds b, bool hideTaskbarIcon) { pimpl = std::make_unique<Pimpl> (*this, b, hideTaskbarIcon); }
 inline DesktopWindow::~DesktopWindow()  {}
 
 inline void* DesktopWindow::getWindowHandle() const                        { return pimpl->getWindowHandle(); }
@@ -1059,6 +1188,8 @@ inline Bounds DesktopWindow::getBounds()                                   { ret
 inline void DesktopWindow::centreWithSize (int w, int h)                   { pimpl->centreWithSize (w, h); }
 inline void DesktopWindow::toFront()                                       { pimpl->toFront(); }
 inline void DesktopWindow::setFileDropCallback (FileDropCallback h)         { pimpl->setFileDropCallback (std::move (h)); }
+inline void DesktopWindow::setAlwaysOnTop(bool b) { pimpl->setAlwaysOnTop(b); }
+
 
 } // namespace choc::ui
 
